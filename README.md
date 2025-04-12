@@ -35,4 +35,5 @@ It provides port rate limiting, blocking/unblocking, logging, and email alerts f
     Download and install [Npcap](https://npcap.com/)   (recommended over WinPcap). Make sure to select the option to install Npcap in "WinPcap API-compatible mode" during installation.
 
 ## Run the application:
+   ```bash
    python app.py
