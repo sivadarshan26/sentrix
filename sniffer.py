@@ -6,6 +6,8 @@ import os
 
 HTTP_METHODS = [b"GET", b"POST", b"PUT", b"DELETE", b"HEAD", b"OPTIONS", b"PATCH"]
 
+active_sniffers = {}
+
 def log_packet(packet):
     if packet.haslayer(IP) and packet.haslayer(TCP) and packet.haslayer(Raw):
         payload = packet[Raw].load
@@ -57,3 +59,15 @@ def remove_sniffer_port(port):
     if port in ports:
         ports.remove(port)
         save_sniffer_ports(ports)
+
+def restore_sniffers():
+    from sniffer import load_sniffer_ports
+    import threading
+
+    ports = load_sniffer_ports()
+    for port in ports:
+        stop_event = threading.Event()
+        thread = threading.Thread(target=start_sniffer, kwargs={"port": port, "stop_event": stop_event})
+        thread.daemon = True
+        thread.start()
+        active_sniffers[port] = (thread, stop_event)

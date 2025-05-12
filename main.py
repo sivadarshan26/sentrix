@@ -1,4 +1,4 @@
-from firewall import restore_sniffers
+from sniffer import restore_sniffers
 from app_factory import app
 from routes import *  # register routes here
 

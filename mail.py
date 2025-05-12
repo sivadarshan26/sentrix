@@ -1,11 +1,12 @@
 import smtplib
 from email.message import EmailMessage
 
-SENDER_EMAIL = "abishekpandiarajan645@gmail.com"
-APP_PASSWORD = ""
-RECIPIENT_EMAIL = "abishekpandiarajan645@gmail.com"
+SENDER_EMAIL = "darshanpc2606@gmail.com"
+APP_PASSWORD = "xudbppiqwznegxdp"
+RECIPIENT_EMAIL = "sivadarshan2270@gmail.com"
 
 def send_alert_email(ip):
+    print(f"[📧] Sending alert mail to admin: IP {ip}")  # Ensure this prints to the console
     msg = EmailMessage()
     msg.set_content(f"🚨 Rate limit exceeded from IP: {ip}")
     msg["Subject"] = "Firewall Alert: Rate Limit Triggered"
@@ -19,3 +20,4 @@ def send_alert_email(ip):
         print(f"Alert email sent for IP: {ip}")
     except Exception as e:
         print(f"Failed to send alert email: {e}")
+

@@ -1,16 +1,18 @@
 # limiter.py
-import json
-import os
-
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-RATE_LIMITS_FILE = "rate_limits.json"
+
+
+# rateLimiter.py
+import json
+import os
+
 port_rate_limits = {}
 
 limiter = Limiter(get_remote_address, default_limits=[])
+RATE_LIMITS_FILE = "rate_limits.json"
 
-# Predefined schemes
 PREDEFINED_LIMITS = {
     "minimal": "5 per minute",
     "hardcore": "20 per second",
@@ -18,30 +20,46 @@ PREDEFINED_LIMITS = {
     "standard": "1000 per hour"
 }
 
-def set_limit_for_port(port, rate=None, unit=None, scheme=None):
-    if scheme and scheme in PREDEFINED_LIMITS:
-        port_rate_limits[str(port)] = PREDEFINED_LIMITS[scheme]
-    elif rate and unit:
-        port_rate_limits[str(port)] = f"{rate} per {unit}"
-    else:
-        return False
-    save_rate_limits()  # ✅ Persist changes
-    return True
-
+def get_all_limits():
+    if os.path.exists(RATE_LIMITS_FILE):
+        with open(RATE_LIMITS_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
 def get_limit_for_port(port):
-    return port_rate_limits.get(str(port))
+    limits = get_all_limits()
+    return limits.get(str(port))
+
+def set_limit_for_port(port, rate=None, unit=None, scheme=None):
+    if scheme and scheme in PREDEFINED_LIMITS:
+        limit = PREDEFINED_LIMITS[scheme]
+    elif rate is not None and unit:
+        limit = f"{rate} per {unit}"
+    else:
+        return False
+
+    port = str(port)
+    limits = get_all_limits()
+    limits[port] = limit
+
+    with open(RATE_LIMITS_FILE, "w") as f:
+        json.dump(limits, f, indent=2)
+
+    return True
 
 def remove_limit_for_port(port):
-    if str(port) in port_rate_limits:
-        del port_rate_limits[str(port)]
-        save_rate_limits()  # ✅ Persist changes
+    port = str(port)
+    limits = get_all_limits()
+    if port in limits:
+        del limits[port]
+        with open(RATE_LIMITS_FILE, "w") as f:
+            json.dump(limits, f, indent=2)
         return True
     return False
+
 def save_rate_limits():
     with open(RATE_LIMITS_FILE, "w") as f:
         json.dump(port_rate_limits, f, indent=2)
-
 
 def load_rate_limits():
     global port_rate_limits

@@ -118,27 +118,6 @@ def get_blocked_ports():
 
     return blocked_ports
 
-# ------------------- Rate Limit -------------------
-
-
-def save_rate_limits():
-    try:
-        with open(RATE_LIMITS_FILE, "w") as f:
-            json.dump(port_rate_limits, f)
-    except Exception as e:
-        print(f"[ERROR] Failed to save rate limits: {e}")
-
-def get_limit_for_port(port):
-    return port_rate_limits.get(str(port))
-
-def remove_limit_for_port(port):
-    port = str(port)
-    if port in port_rate_limits:
-        del port_rate_limits[port]
-        save_rate_limits()
-        return True
-    return False
-
 
 # ------------------- Sniffer Bootstrap -------------------
 
@@ -153,4 +132,97 @@ def restore_sniffers():
             with open("firewall.log", "a") as f:
                 f.write(f"[INFO] Sniffer auto-restarted on port {port}\n")
 
+
+from mail import send_alert_email
+from rateLimiter import get_limit_for_port
+
+def track_access_to_system_port(port):
+    try:
+        result = subprocess.run(
+            f"ss -tn state established '( sport = :{port} )'",  # Linux
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        return len(result.stdout.strip().split("\n")) - 1  # Exclude header
+    except Exception as e:
+        print(f"[ERROR] Couldn't track port {port}: {e}")
+        return 0
+
+def check_and_block_system_port(port, ip):
+    limit = get_limit_for_port(port)
+    if not limit:
+        return False, "⚠️ No rate limit set."
+
+    rate, unit = limit.split(" per ")
+    allowed = int(rate)
+
+    active_conn = track_access_to_system_port(port)
+    if active_conn > allowed:
+        block_port(port)
+        send_alert_email(f"⚠️ Port {port} exceeded rate limit ({active_conn} > {allowed}) from IP: {ip}")
+        return True, f"🚫 Port {port} blocked. Limit exceeded."
+
+    return False, f"✅ Port {port} under limit ({active_conn} ≤ {allowed})"
+
+
+from collections import defaultdict
+import time
+
+port_hit_counter = defaultdict(lambda: defaultdict(int))  # {port: {ip: count}}
+def monitor_ports(rate_limit_default=10, window=60):
+    """Monitor real system ports with dynamic rate limits from config."""
+    while True:
+        try:
+            # 👇 Load ports + limits dynamically each cycle
+            limits = get_all_limits()
+            ports_to_watch = [int(port) for port in limits.keys()]
+
+            result = subprocess.run(
+                ["ss", "-tn", "state", "established"],
+                capture_output=True, text=True
+            )
+            lines = result.stdout.strip().split("\n")
+
+            for line in lines[1:]:  # Skip header
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+
+                remote_address = parts[4]
+                local_address = parts[3]
+
+                try:
+                    local_ip, local_port = local_address.rsplit(":", 1)
+                    remote_ip, _ = remote_address.rsplit(":", 1)
+                except ValueError:
+                    continue
+
+                if not local_port.isdigit():
+                    continue
+
+                port = int(local_port)
+                if port not in ports_to_watch:
+                    continue
+
+                if remote_ip.startswith("127.") or remote_ip == "::1":
+                    continue  # skip localhost
+
+                limit_str = limits.get(str(port), f"{rate_limit_default} per minute")
+                rate = int(limit_str.split(" per ")[0])
+
+                port_hit_counter[port][remote_ip] += 1
+                log_access(remote_ip)
+
+                if port_hit_counter[port][remote_ip] > rate:
+                    block_port(port)
+                    send_alert_email(f"Blocked {remote_ip} on port {port}")
+                    with open("firewall.log", "a") as f:
+                        f.write(f"[BLOCKED] {remote_ip} exceeded rate limit on port {port}\n")
+                    port_hit_counter[port][remote_ip] = 0
+
+        except Exception as e:
+            print(f"[ERROR] Monitoring failed: {e}")
+
+        time.sleep(window)
 

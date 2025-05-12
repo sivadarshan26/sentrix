@@ -1,6 +1,6 @@
 # routes.py
 from flask import request, jsonify, render_template
-import flask_limiter.errors
+from flask_limiter.errors import RateLimitExceeded
 import threading
 from datetime import datetime
 import os 
@@ -20,9 +20,27 @@ from firewall import (
     active_sniffers,
     log_access,
     get_blocked_ports,
-    port_rate_limits
+    check_and_block_system_port,
+    monitor_ports
 )
-from rateLimiter import set_limit_for_port, get_limit_for_port, remove_limit_for_port, save_rate_limits, load_rate_limits
+
+from rateLimiter import set_limit_for_port, get_limit_for_port, load_rate_limits, save_rate_limits, port_rate_limits
+
+from flask_limiter.errors import RateLimitExceeded
+from flask import request
+from mail import send_alert_email
+from app_factory import app
+
+@app.errorhandler(RateLimitExceeded)
+def ratelimit_handler(e):
+    ip = request.remote_addr
+    print(f"[🔥] Rate limit exceeded by: {ip}")
+    send_alert_email(ip)
+    return {
+        "error": "Rate limit exceeded. Calm down buddy 😅"
+    }, 429
+
+
 
 
 # app = Flask(__name__)
@@ -31,20 +49,14 @@ from rateLimiter import set_limit_for_port, get_limit_for_port, remove_limit_for
 load_rate_limits()
 restore_sniffers()
 
-# ------------------- Error -------------------
-
-@app.errorhandler(flask_limiter.errors.RateLimitExceeded)
-def ratelimit_handler(e):
-    ip = request.remote_addr
-    send_alert_email(ip)
-    return "⚠️ Rate limit exceeded. Admin notified.", 429
-
 # ------------------- UI -------------------
 
 @app.route("/")
 def home():
     log_access(request.remote_addr)
-    return render_template("index.html", blocked_ports=get_blocked_ports(), limits=port_rate_limits)
+    with open("rate_limits.json") as f:
+        limits = json.load(f)
+    return render_template("index.html", blocked_ports=get_blocked_ports(), limits=limits)
 
 # ------------------- APIs -------------------
 
@@ -70,7 +82,17 @@ def api_unblock():
 @app.route("/api/start_sniffer", methods=["POST"])
 def api_start_sniffer():
     data = request.get_json()
-    port = int(data.get("port"))
+
+    port = data.get("port") or data.get("sniff_port")
+
+    if port is None:
+        return jsonify({"error": "Missing 'port' or 'sniff_port' in request body"}), 400
+
+    try:
+        port = int(port)
+    except (ValueError, TypeError):
+        return jsonify({"error": "'port' must be an integer"}), 400
+
     if port in active_sniffers:
         return jsonify({"error": "Already running"}), 400
 
@@ -87,21 +109,29 @@ def api_start_sniffer():
     return jsonify({"status": "started"})
 
 
+
+from flask import request, jsonify
+
 @app.route("/api/stop_sniffer", methods=["POST"])
 def api_stop_sniffer():
     data = request.get_json()
-    port = int(data.get("port"))
+    if not data or "sniff_port" not in data:
+        return jsonify({"error": "Missing 'sniff_port' in request body"}), 400
+
+    try:
+        port = int(data["sniff_port"])
+    except (ValueError, TypeError):
+        return jsonify({"error": "'sniff_port' must be an integer"}), 400
+
     if port in active_sniffers:
         thread, stop_event = active_sniffers[port]
         stop_event.set()
         del active_sniffers[port]
         remove_sniffer_port(port)
+        return jsonify({"status": "Sniffer stopped"}), 200
+    else:
+        return jsonify({"error": f"No active sniffer on port {port}"}), 404
 
-        with open("firewall.log", "a") as f:
-            f.write(f"[SNIFFER STOPPED] {datetime.now()} - Port {port}\n")
-
-        return jsonify({"status": "stopped"})
-    return jsonify({"error": "Not running"}), 400
 
 
 @app.route("/api/sniffed_ports")
@@ -131,19 +161,25 @@ def api_set_limit():
 @app.route("/api/remove_limit", methods=["POST"])
 def remove_limit():
     data = request.get_json()
-    port = str(data["port"])  # or int, depending on your key style
+    port = str(data["port"])
 
+    # Load limits from file
     with open("rate_limits.json", "r") as f:
         limits = json.load(f)
 
+    # If the port exists in the limits, remove it
     if port in limits:
         del limits[port]
 
+    # Save updated file
     with open("rate_limits.json", "w") as f:
         json.dump(limits, f, indent=2)
 
-    return jsonify(success=True)
+    # Also update in-memory dictionary
+    port_rate_limits.clear()  # Clear the old limits
+    port_rate_limits.update(limits)  # Re-load the updated limits
 
+    return jsonify(success=True)
 
 @limiter.exempt
 @app.route("/api/access_logs")
@@ -157,14 +193,22 @@ def api_logs():
                     log_entries.append(line)
     return jsonify(log_entries[-20:][::-1])
 
+
 @app.route("/port/<int:port_number>", methods=["GET", "POST"])
 @limiter.limit(lambda: get_limit_for_port(request.view_args["port_number"]) or "1000 per minute")
 def simulate_port_hit(port_number):
     ip = request.remote_addr
     log_access(ip)
+
+    blocked, msg = check_and_block_system_port(port_number, ip)
+
     with open("firewall.log", "a") as f:
-        f.write(f"[ACCESS] Port {port_number} hit from {ip}\n")
-    return jsonify({"message": f"Access to port {port_number} logged."})
+        f.write(f"[ACCESS] Port {port_number} hit from {ip} - {msg}\n")
+
+    if blocked:
+        return jsonify({"error": msg}), 429
+
+    return jsonify({"message": msg})
 
 @app.route("/api/rate_limits")
 def get_rate_limits():
@@ -173,4 +217,11 @@ def get_rate_limits():
     return jsonify(data)
 
 if __name__ == "__main__":
+    # Start watchdog
+    watchdog_thread = threading.Thread(target=monitor_ports)
+    watchdog_thread.daemon = True
+    watchdog_thread.start()
+
+    # Run Flask as usual
     app.run(host="0.0.0.0", port=5000, debug=True)
+
